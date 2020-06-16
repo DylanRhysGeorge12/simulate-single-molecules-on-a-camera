@@ -1,0 +1,152 @@
+import numpy as np
+import pandas as pd
+import psf
+import psfmodels as psfm
+import matplotlib.pyplot as plt
+from matplotlib.colors import PowerNorm
+from scipy import ndimage
+from skimage import io
+from sklearn.decomposition import PCA
+
+def create_ground_truth(x,y,z,t):
+    
+    
+    # arg: x,y,z - size in 3D . t - number of frames
+    # creates array in 3D with a molecule given signal of 1 with random walk in 3D
+    # deletes first half of data as random walk starts at centre (in focus - not realistic)
+    
+    ground_truth = np.zeros(shape=(x,y,z,t))
+    n = t+t
+    x1, y1, z1= (np.cumsum(np.random.randn(n)),np.cumsum(np.random.randn(n)),np.cumsum(np.random.randn(n)))  
+    x1 = np.round(x1)+ round(x/2)
+    x1 = np.delete(x1, slice(0,t), axis=0)
+    y1= np.round(y1) +round(y/2)
+    y1 = np.delete(y1, slice(0,t), axis=0)
+    z1= np.round(z1)+round(z/2)
+    z1 = np.delete(z1, slice(0,t), axis=0)
+    t1 = np.linspace(0,(t-1),t)
+    
+    # molecule can diffuse out of array: if it does put it back in
+    
+    if max(x1) > x:
+        x1 = x1-round(x/4)
+    if max(y1) > x:
+        y1 = y1-round(y/4)
+    if max(z1) > z:
+        z1 = z1-round(x/4)
+    
+    z1 = z1.astype(np.int64)
+    y1 = y1.astype(np.int64)
+    x1 = x1.astype(np.int64)
+    t1 = t1.astype(np.int64)
+    ground_truth[y1,x1,z1,t1]= 1
+    
+    return ground_truth, t1, z1
+
+def create_psf():
+    
+    #generates point square function based on wavelength, size of x-direction and numerical aperature
+    
+    
+    dxy = 0.005
+    nz = nx = 110
+    psf = psfm.vectorial_psf_centered(nz=nz, nx=nx, dxy=dxy, dz=dxy, pz=0, wvl = 0.669)
+    
+    return psf
+
+def convolve(psf,ground_truth,t1, z1):
+    
+     # arg: psf - point square function . t1 - number of frames
+     # Convolves psf with ground truth
+    
+    resulting_image_stack = []
+    for i in range(len(t1)):
+      z2 = z1[i]
+      psfa = psf[:,:,z2]
+      arraya =  ground_truth[:,:,z2,i]
+      arraya = ndimage.convolve(psfa, arraya, mode='constant', cval=0.0)
+      s = resulting_image_stack.append(arraya[:,:])
+    convolved_image = np.array(resulting_image_stack)
+    return convolved_image
+
+def bin_on_to_camera(data,n,m):
+    
+        # arg: data - array n,m - size in x and y divided by how much binning
+    
+    
+        bs = data.shape[0]//n,data.shape[1]//m  # blocksize averaged over
+        
+        return np.reshape(np.array([np.sum(data[k1*bs[0]:(k1+1)*bs[0],k2*bs[1]:(k2+1)*bs[1]]) for k1 in range(n) for k2 in range(m)]),(n,m))
+
+def bin_and_add_noise(x,y,t1,convolved_image):
+    
+     # arg: convolved_image - calculated already in last function
+    
+    resulting_image = []
+    for f in range(len(t1)):
+        n,m = x//22,y//22   
+        my_arr = convolved_image[f,:,:]
+        # bin image                                                               
+        reduced_matrix = bin_on_to_camera(my_arr,n,m) 
+        l = resulting_image.append(reduced_matrix[:,:])
+        
+    my_array1 = np.array(resulting_image)
+    camera_image = np.full((t,24,24),100)
+    k = np.add(camera_image[:,10:15,10:15],my_array1)
+    (camera_image[:,10:15,10:15]) = k
+    # add read noise
+    read_noise = abs(np.random.normal(1.6,2,(t,24,24)))                                 
+    camera_image = np.add(read_noise, camera_image)
+    return camera_image
+    
+def pca(signal,background,no_of_pixels,t):
+    a = np.reshape(signal,(t,no_of_pixels))
+    b = np.reshape(background,(t,no_of_pixels))
+    c= np.append(a, b,1)
+    bs= c.T
+    pca = PCA(n_components=2, whiten=True)
+    pca.fit(bs)
+    v = pca.explained_variance_
+    b = pca.singular_values_
+    
+    #plot principal components
+    
+    X_pca = pca.transform(bs)
+    s_pca = X_pca[0:no_of_pixels,:]
+    b_pca = X_pca[no_of_pixels:no_of_pixels*2,:]
+    x1 = s_pca[:,0]
+    y1 = s_pca[:,1]
+    plot2 = plt.figure(2)
+    plt.scatter(x1, y1, c='r',alpha =0.2)
+    x2 = b_pca[:,0]
+    y2 = b_pca[:,1]
+    plt.scatter(x2, y2, c='b',alpha=0.2)
+    plt.xlabel('PCA comp 1')
+    plt.ylabel('PCA comp 2')
+    plt.title('PCA plot ')
+    plt.legend()
+    
+
+
+
+for g in range(2): # do it twice
+    
+    #create a 4d array t- no.of frames
+    x,y,z,t= 110,110,110,500 
+    ground_truth, t1, z1 = create_ground_truth(x,y,z,t)
+    
+    psf = create_psf()
+    convolved_image = convolve(psf, ground_truth,t1, z1)
+    camera_image = bin_and_add_noise(x,y,t1,convolved_image)
+    
+    # plot time trace at a pixel on camera
+    #plot1 = plt.figure(1)
+   # plt.plot(t1,camera_image[:,10,11], label = 'line')
+    
+    # plot PCA components 
+    signal = camera_image[:,11:13,18:20]
+    background = camera_image[:,11:13,16:18]
+    no_of_pixels = 4 #number of pixels of either signal or background (must be same)
+    pca(signal, background, no_of_pixels,t)
+    
+plt.show()
